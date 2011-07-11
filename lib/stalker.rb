@@ -84,21 +84,20 @@ module Stalker
     log_job_begin(name, args)
     job_handler = jobs[name]
     raise(NoSuchJob, name) unless job_handler
-
-    begin
+    job_successful = begin
       Timeout::timeout(job.ttr - 1) do
         if defined? @@before_handlers and @@before_handlers.respond_to? :each
           @@before_handlers.each do |block|
             block.call(name)
           end
         end
-        job_handler[:handler].call(args, job)
+        job_handler[:handler].call(args, job) || true
       end
     rescue Timeout::Error
       raise JobTimeout, "#{name} hit #{job.ttr-1}s timeout"
     end
-
-    job.delete
+    
+    job.delete if job_successful
     log_job_end(name)
   rescue Beanstalk::NotConnected => e
     failed_connection(e)
