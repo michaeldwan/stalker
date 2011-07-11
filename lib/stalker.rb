@@ -1,29 +1,41 @@
 require 'beanstalk-client'
-require 'json'
 require 'uri'
 require 'timeout'
 
 module Stalker
   extend self
+  
+  JOB_DEFAULTS = {
+    :pri => 66536,
+    :delay => 0,
+    :ttr => 300,
+    :max_attempts => 25,
+    :retry_delay => 5
+  }
 
   def connect(url)
     @@url = url
     beanstalk
   end
 
-  def enqueue(job, args={}, opts={})
-    pri   = opts[:pri]   || 65536
-    delay = [0, opts[:delay].to_i].max  
-    ttr   = opts[:ttr]   || 120
-    beanstalk.use job
-    beanstalk.put [ job, args ].to_json, pri, delay, ttr
+  def enqueue(job, args = {}, opts = {})
+    job_handler = jobs[job] || JOB_DEFAULTS
+    pri = opts[:pri] || job_handler[:pri]
+    delay = opts[:delay] || job_handler[:delay]
+    ttr = opts[:ttr] || job_handler[:ttr]
+    beanstalk.use(job)
+    beanstalk.put([job, args].to_json, pri, delay, ttr)
   rescue Beanstalk::NotConnected => e
     failed_connection(e)
   end
 
-  def job(j, &block)
-    @@handlers ||= {}
-    @@handlers[j] = block
+  def job(job_name, options = {}, &block)
+    options.reverse_merge!(JOB_DEFAULTS)
+    jobs[job_name] = options.merge(:handler => block)
+  end
+  
+  def jobs
+    @@jobs ||= {}
   end
 
   def before(&block)
@@ -38,14 +50,14 @@ module Stalker
   class NoJobsDefined < RuntimeError; end
   class NoSuchJob < RuntimeError; end
 
-  def prep(jobs=nil)
-    raise NoJobsDefined unless defined?(@@handlers)
+  def prep(jobs = nil)
+    raise NoJobsDefined unless defined?(@@jobs)
     @@error_handler = nil unless defined?(@@error_handler)
 
     jobs ||= all_jobs
 
     jobs.each do |job|
-      raise(NoSuchJob, job) unless @@handlers[job]
+      raise(NoSuchJob, job) unless self.jobs[job]
     end
 
     log "Working #{jobs.size} jobs: [ #{jobs.join(' ')} ]"
@@ -59,7 +71,7 @@ module Stalker
     failed_connection(e)
   end
 
-  def work(jobs=nil)
+  def work(jobs = nil)
     prep(jobs)
     loop { work_one_job }
   end
@@ -68,10 +80,10 @@ module Stalker
 
   def work_one_job
     job = beanstalk.reserve
-    name, args = JSON.parse job.body
+    name, args = JSON.parse(job.body)
     log_job_begin(name, args)
-    handler = @@handlers[name]
-    raise(NoSuchJob, name) unless handler
+    job_handler = jobs[name]
+    raise(NoSuchJob, name) unless job_handler
 
     begin
       Timeout::timeout(job.ttr - 1) do
@@ -80,7 +92,7 @@ module Stalker
             block.call(name)
           end
         end
-        handler.call(args)
+        job_handler[:handler].call(args, job)
       end
     rescue Timeout::Error
       raise JobTimeout, "#{name} hit #{job.ttr-1}s timeout"
@@ -93,14 +105,22 @@ module Stalker
   rescue SystemExit
     raise
   rescue => e
-    log_error exception_message(e)
-    job.bury rescue nil
-		log_job_end(name, 'failed') if @job_begun
+    log_error(exception_message(e))
+    attempts = job.stats["reserves"]
+    if attempts < job_handler[:max_attempts]
+      delay = (job_handler[:retry_delay] + attempts ** 3)
+      job.release(nil, delay)
+      log_job_end(name, "(failed - attempt ##{attempts}, retrying in #{delay}s)") if @job_begun
+    else
+      job.bury rescue nil
+      log_job_end(name, "(failed - attempt ##{attempts}, burying)") if @job_begun
+    end
+
     if error_handler
       if error_handler.arity == 1
         error_handler.call(e)
       else
-        error_handler.call(e, name, args)
+        error_handler.call(e, name, args, job)
       end
     end
   end
@@ -125,10 +145,10 @@ module Stalker
     @job_begun = Time.now
   end
 
-  def log_job_end(name, failed=false)
+  def log_job_end(name, message = nil)
     ellapsed = Time.now - @job_begun
     ms = (ellapsed.to_f * 1000).to_i
-    log "Finished #{name} in #{ms}ms #{failed ? ' (failed)' : ''}"
+    log "Finished #{name} in #{ms}ms #{message}"
   end
 
   def log(msg)
@@ -173,7 +193,7 @@ module Stalker
   end
 
   def all_jobs
-    @@handlers.keys
+    jobs.keys
   end
 
   def error_handler
@@ -181,7 +201,7 @@ module Stalker
   end
 
   def clear!
-    @@handlers = nil
+    @@jobs = nil
     @@before_handlers = nil
     @@error_handler = nil
   end
