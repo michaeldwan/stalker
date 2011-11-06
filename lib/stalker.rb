@@ -122,6 +122,29 @@ module Stalker
     end
   end
 
+  def stats
+    out = {}
+    beanstalk.list_tubes.each do |server, tubes|
+      server_stats = {}
+      tubes.each do |tube|
+        server_stats[tube] = beanstalk.stats_tube(tube)
+      end
+      out[server] = server_stats
+    end
+    out
+  end
+  
+  def inspect
+    out = ""
+    stats.each do |server, tubes|
+      out << "#{server}\n"
+      tubes.each do |tube, stats|
+        out << "  #{tube}: #{stats["current-jobs-ready"]}\n"
+      end
+    end
+    puts out
+  end
+
   private
     def add_hook(type, &block)
       @@hooks ||= Hash.new { |h, k| h[k] = [] }
