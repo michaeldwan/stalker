@@ -5,6 +5,11 @@ require 'timeout'
 module Stalker
   extend self
   
+  class NoJobsDefined < RuntimeError; end
+  class NoSuchJob < RuntimeError; end
+  class JobTimeout < RuntimeError; end
+  class BadURL < RuntimeError; end
+
   JOB_DEFAULTS = {
     :pri => 66536,
     :delay => 0,
@@ -38,21 +43,24 @@ module Stalker
     @@jobs ||= {}
   end
 
+  def error(&block)
+    add_hook(:error, &block)
+  end
+
   def before(&block)
-    @@before_handlers ||= []
-    @@before_handlers << block
+    add_hook(:before, &block)
   end
 
-  def error(&blk)
-    @@error_handler = blk
+  def after(&block)
+    add_hook(:after, &block)
   end
 
-  class NoJobsDefined < RuntimeError; end
-  class NoSuchJob < RuntimeError; end
+  def after_fork(&block)
+    add_hook(:after, &block)
+  end
 
   def prep(jobs = nil)
     raise NoJobsDefined unless defined?(@@jobs)
-    @@error_handler = nil unless defined?(@@error_handler)
 
     jobs ||= all_jobs
 
@@ -71,34 +79,56 @@ module Stalker
     failed_connection(e)
   end
 
-  def work(jobs = nil)
-    prep(jobs)
-    loop { work_one_job }
+  def fork?
+    true
+  end
+  
+  def running?
+    true
   end
 
-  class JobTimeout < RuntimeError; end
+  def start(jobs = nil)
+    prep(jobs)
+    while running?
+      if fork?
+        fork_and_work
+      else
+        work
+      end
+      GC.start
+    end
+  end
 
-  def work_one_job
+  def fork_and_work
+    pid = fork do
+      run_hooks(:after_fork)
+      work
+    end
+    Process.wait(pid)
+  end
+
+  def work
     job = beanstalk.reserve
     name, args = JSON.parse(job.body)
     log_job_begin(name, args)
+    run_hooks(:before, {name: name, args: args, job: job})
     job_handler = jobs[name]
     raise(NoSuchJob, name) unless job_handler
     job_successful = begin
       Timeout::timeout(job.ttr - 1) do
-        if defined? @@before_handlers and @@before_handlers.respond_to? :each
-          @@before_handlers.each do |block|
-            block.call(name)
-          end
-        end
         job_handler[:handler].call(args, job) || true
       end
     rescue Timeout::Error
       raise JobTimeout, "#{name} hit #{job.ttr-1}s timeout"
     end
-    
+
     job.delete if job_successful
     log_job_end(name)
+    begin
+      run_hooks(:after, {name: name, args: args, job: job})
+    rescue
+      log_error "An error occured while running the after hook: #{exception_message($!)}"
+    end
   rescue Beanstalk::NotConnected => e
     failed_connection(e)
   rescue SystemExit
@@ -115,13 +145,7 @@ module Stalker
       log_job_end(name, "(failed - attempt ##{attempts}, burying)") if @job_begun
     end
 
-    if error_handler
-      if error_handler.arity == 1
-        error_handler.call(e)
-      else
-        error_handler.call(e, name, args, job)
-      end
-    end
+    run_hooks(:error, e, {name: name, args: args, job: job})
   end
 
   def failed_connection(e)
@@ -167,8 +191,6 @@ module Stalker
     ENV['BEANSTALK_URL'] || 'beanstalk://localhost/'
   end
 
-  class BadURL < RuntimeError; end
-
   def beanstalk_addresses
     uris = beanstalk_url.split(/[\s,]+/)
     uris.map {|uri| beanstalk_host_and_port(uri)}
@@ -195,13 +217,24 @@ module Stalker
     jobs.keys
   end
 
-  def error_handler
-    @@error_handler
-  end
-
   def clear!
     @@jobs = nil
-    @@before_handlers = nil
-    @@error_handler = nil
+    @@hooks = nil
   end
+
+  private
+    def add_hook(type, &block)
+      @@hooks ||= Hash.new { |h, k| h[k] = [] }
+      @@hooks[type] << block
+    end
+    
+    def run_hooks(type, *arguments)
+      @@hooks[type].each do |block|
+        if block.arity == 1
+          block.call(arguments.first)
+        else
+          block.call(*arguments)
+        end
+      end
+    end
 end
