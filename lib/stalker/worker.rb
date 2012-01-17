@@ -4,7 +4,7 @@ module Stalker
     def initialize(jobs = nil)
       jobs ||= Stalker.all_jobs
       
-      @fork = ENV["STALKER_FORK_WORKER"] != "false"
+      @fork = ENV["STALKER_FORK_WORKER"] == "true"
       
       raise NoJobsDefined if jobs.blank?
 
