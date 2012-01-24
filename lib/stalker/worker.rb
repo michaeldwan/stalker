@@ -65,11 +65,12 @@ module Stalker
       rescue Timeout::Error
         raise JobTimeout, "#{name} hit #{job.ttr-1}s timeout"
       end
-
+      age = job.age
       job.delete if job_successful
       log_job_end(name)
       begin
-        Stalker.run_hooks(:after, {name: name, args: args, job: job})
+        ms = ((Time.now - @job_begun).to_f * 1000).to_i
+        Stalker.run_hooks(:after, {name: name, args: args, job: job, ms: ms, age: (age * 1000) + ms})
       rescue
         log_error "An error occured while running the after hook: #{Stalker.exception_message($!)}"
       end
