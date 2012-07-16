@@ -53,7 +53,11 @@ module Stalker
 
     def work
       job = Stalker.beanstalk.reserve
-      name, args = JSON.parse(job.body)
+      name, args = decode(job.body)
+      if name.blank?
+        log_error "Invalid body: #{job.body}"
+        return
+      end
       log_job_begin(name, args)
       Stalker.run_hooks(:before, {name: name, args: args, job: job})
       job_handler = Stalker.jobs[name]
@@ -153,6 +157,16 @@ module Stalker
       
       def log_error(message)
         Stalker.log_error(message)
+      end
+
+      def decode(body)
+        MessagePack.unpack(body)
+      rescue
+        begin
+          JSON.parse(body)
+        rescue 
+          nil
+        end
       end
   end
 end

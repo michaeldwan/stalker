@@ -27,7 +27,7 @@ module Stalker
     delay = opts[:delay] || job_handler[:delay]
     ttr = opts[:ttr] || job_handler[:ttr]
     beanstalk.use(job)
-    beanstalk.put([job, args].to_json, pri, delay, ttr)
+    beanstalk.put([job, args].to_msgpack, pri, delay, ttr)
   rescue Beanstalk::NotConnected => e
     failed_connection(e)
   end
