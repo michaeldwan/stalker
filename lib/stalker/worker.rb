@@ -61,7 +61,10 @@ module Stalker
       log_job_begin(name, args)
       Stalker.run_hooks(:before, {name: name, args: args, job: job})
       job_handler = Stalker.jobs[name]
-      raise(NoSuchJob, name) unless job_handler
+      unless job_handler
+        puts "NO JOB HANDLER FOR: '#{name}' on '#{Stalker.beanstalk.list_tube_used}'"
+        # raise(NoSuchJob, name) 
+      end
       job_successful = begin
         Timeout::timeout(job.ttr - 1) do
           job_handler[:handler].call(args, job) || true
