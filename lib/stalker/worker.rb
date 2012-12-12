@@ -63,6 +63,7 @@ module Stalker
       job_handler = Stalker.jobs[name]
       unless job_handler
         puts "NO JOB HANDLER FOR: '#{name}' on '#{Stalker.beanstalk.list_tube_used}'"
+        return
         # raise(NoSuchJob, name) 
       end
       job_successful = begin
